@@ -1,0 +1,77 @@
+{
+  "rooms": {
+    "Hall": {
+      "description": "You are standing in a long hall. A door leads east to the Kitchen and south to the Garden.",
+      "items": [
+        "map"
+      ],
+      "exits": {
+        "east": {
+          "to": "Kitchen"
+        },
+        "south": {
+          "to": "Garden"
+        }
+      }
+    },
+    "Kitchen": {
+      "description": "A tidy kitchen with a faint smell of spice. There's a locked door to the north.",
+      "items": [
+        "knife",
+        "silver_key"
+      ],
+      "exits": {
+        "west": {
+          "to": "Hall"
+        },
+        "north": {
+          "to": "Treasure Room",
+          "locked": true,
+          "key": "silver_key"
+        }
+      }
+    },
+    "Garden": {
+      "description": "A small garden. The flowers are in bloom.",
+      "items": [
+        "flower"
+      ],
+      "exits": {
+        "north": {
+          "to": "Hall"
+        }
+      },
+      "npcs": {
+        "old_man": {
+          "name": "Old Man",
+          "dialogue": [
+            "Stay awhile and listen...",
+            "The treasure lies behind the locked door."
+          ]
+        }
+      }
+    },
+    "Treasure Room": {
+      "description": "You've found the treasure room! A glittering chest sits in the centre.",
+      "items": [
+        "treasure"
+      ],
+      "exits": {
+        "south": {
+          "to": "Kitchen"
+        }
+      }
+    }
+  },
+  "start": "Hall",
+  "win_condition": {
+    "inventory_contains": [
+      "treasure"
+    ]
+  },
+  "lose_condition": null,
+  "metadata": {
+    "title": "Sample Adventure",
+    "author": "Engine Demo"
+  }
+}
