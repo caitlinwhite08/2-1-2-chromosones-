@@ -1,0 +1,165 @@
+{
+  "meta": { "title": "Enchanted Forest Adventure", "version": 1 },
+
+  "start_room": "Forest Clearing",
+
+  "rules": {
+    "win": [
+      { "type": "in_room", "room": "Heart of the Grove" },
+      { "type": "has_item", "item": "starbloom" }
+    ],
+    "lose": [
+      { "type": "in_room", "room": "Briar Hollow" }
+    ]
+  },
+
+  "rooms": {
+    "Forest Clearing": {
+      "description": "A ring of moss and foxglove, dusted with pale gold motes. The air tastes faintly of honey.",
+      "items": ["glimmer_map"],
+      "npcs": ["elf_guide"],
+      "exits": {
+        "north": { "to": "Mushroom Grove" },
+        "east": { "to": "Whispering Thicket" }
+      },
+      "events": {
+        "on_enter": [
+          { "type": "message", "text": "A hush settles as the forest seems to listen." }
+        ]
+      }
+    },
+
+    "Mushroom Grove": {
+      "description": "A glade of giant mushrooms, caps glowing like quiet lanterns under the trees.",
+      "items": ["glowcap"],
+      "npcs": [],
+      "exits": {
+        "south": { "to": "Forest Clearing" },
+        "north": { "to": "Crystal Pond" }
+      },
+      "events": {}
+    },
+
+    "Whispering Thicket": {
+      "description": "Whispers ripple through thin trees. A path of firefly sparks winds downward.",
+      "items": ["fae_note"],
+      "npcs": ["fairy"],
+      "exits": {
+        "west": { "to": "Forest Clearing" },
+        "down": { "to": "Briar Hollow" }
+      },
+      "events": {}
+    },
+
+    "Crystal Pond": {
+      "description": "Still water mirrors the sky. A stone arch to the east hums with a soft rune-glow.",
+      "items": [],
+      "npcs": [],
+      "exits": {
+        "south": { "to": "Mushroom Grove" },
+        "east":  {
+          "to": "Heart of the Grove",
+          "locked": true,
+          "requires": "silver_key",
+          "lock_msg": "The arch is sealed. A silver keyhole glints."
+        }
+      },
+      "events": {
+        "on_use": [
+          {
+            "item": "glowcap",
+            "events": [
+              { "type": "message", "text": "You lift the glowcap to the water. The pond shimmers and a silver key appears." },
+              { "type": "give_item", "item": "silver_key" },
+              {
+                "type": "complete_task",
+                "task_id": "light_the_pond",
+                "consume_item": true,
+                "requires_item": "glowcap",
+                "message": "(Task completed: The pond is lit.)"
+              }
+            ]
+          }
+        ]
+      }
+    },
+
+    "Heart of the Grove": {
+      "description": "An ancient tree rises here, roots woven with starlight and drifting petals.",
+      "items": ["starbloom"],
+      "npcs": ["elf_guardian"],
+      "exits": { "west": { "to": "Crystal Pond" } },
+      "events": {
+        "on_enter": [
+          { "type": "message", "text": "The air hums with quiet power." }
+        ]
+      }
+    },
+
+    "Briar Hollow": {
+      "description": "Thorns close in. The air goes still, like the forest is holding its breath.",
+      "items": [],
+      "npcs": [],
+      "exits": { "up": { "to": "Whispering Thicket" } },
+      "events": {}
+    }
+  },
+
+  "npcs": {
+    "elf_guide": {
+      "display_name": "Elven Guide",
+      "room": "Forest Clearing",
+      "dialogue": {
+        "default": "Right then, welcome to the clearing. Lovely bit of chaos, isn’t it?",
+        "if_has_item_glimmer_map": "Follow the glow to the pond; the key sits by the water, no fuss."
+      },
+      "events": {
+        "on_talk": [
+          {
+            "type": "give_task",
+            "task_id": "fetch_glowcap",
+            "description": "Fetch a glowcap from the Mushroom Grove."
+          },
+          {
+            "type": "complete_task",
+            "task_id": "fetch_glowcap",
+            "requires_item": "glowcap",
+            "message": "(Task completed: Glowcap delivered.)",
+            "missing_msg": "(You still need a glowcap.)"
+          },
+          { "type": "message", "text": "The elf gives a quick nod and vanishes into the ferns." }
+        ]
+      }
+    },
+
+    "fairy": {
+      "display_name": "Woodland Fairy",
+      "room": "Whispering Thicket",
+      "dialogue": {
+        "default": "Down there is all thorns and drama, but the stories are top tier. Your call."
+      },
+      "events": {
+        "on_talk": [
+          {
+            "type": "give_task",
+            "task_id": "light_the_pond",
+            "description": "Use a glowcap to light the Crystal Pond."
+          }
+        ]
+      }
+    },
+
+    "elf_guardian": {
+      "display_name": "Elder Elf",
+      "room": "Heart of the Grove",
+      "dialogue": {
+        "default": "You made it. Take the starbloom and try not to look too shocked about it."
+      },
+      "events": {
+        "on_talk": [
+          { "type": "message", "text": "The elder elf steps aside with a half-smile." }
+        ]
+      }
+    }
+  }
+}
