@@ -1,0 +1,441 @@
+#the engine.py coded by caitlin 
+import json
+from dataclasses import dataclass, field 
+from typing import dict,list, optional, any, callable, tuple 
+
+class gamedataerror (Exception):
+    pass
+
+#this section will inclue the data models 
+@dataclass
+class exit:
+    
+to:str
+locked:bool = False 
+requires: optional [str] = none 
+lock_msg: str = "it is locked."
+
+@dataclass 
+Enchanted Forest:
+    name:str 
+    items: list[str] = field(default_factory=list)
+    exits: dict[str, exit]= field(default_factory=dict)
+    npc_id:list[str]= field(default_factory=list)
+    events: dict[str, list[dict]]= field(default_factory=dict)#example: {"on enter":[...], "on get":[...]}
+    
+@dataclass 
+forest NPC:
+    npc_id:str 
+    display_name: str 
+    room:str 
+    dialogue: dict[str,str]= field(default_factory=dict)
+    events: dict[str,List[dict]]= field(default_factory=dict) #example:{"on talk":[...]}
+    
+ @dataclass
+class GameState:
+    current_room: str
+    inventory: List[str] = field(default_factory=list)
+
+#now codeing for the game engine 
+class GameEngine:
+    
+       """
+    "Framework" responsibilities:
+    - Loads world from JSON (rooms/npcs/exits/rules/events)
+    - Maintains state (location + inventory + mutable world)
+    - Executes commands via a command registry
+    - Evaluates win/lose rules (generic conditions)
+    - Applies events (small effect scripts) in a controlled way
+    """
+    def __init__(self, rooms: dict[str, room], npcs: dict[str, NPC], rules: dict[str, List[dict]], start_room: str):
+        self.rooms = rooms
+        self.npcs = npcs
+        self.rules = rules
+        self.state = GameState(current_room=start_room, inventory=[])
+
+# the commands used 
+self.commands: Dict[str, Callable[[Optional[str]], str]] = {
+            "help": self.cmd_help,
+            "look": self.cmd_look,
+            "inventory": self.cmd_inventory,
+            "go": self.cmd_go,
+            "get": self.cmd_get,
+            "drop": self.cmd_drop,
+            "talk": self.cmd_talk,
+            "save": self.cmd_save,
+            "load": self.cmd_load,
+            "quit": self.cmd_quit
+        }
+        self._should_quit = False
+        
+#running plus loading of game engine 
+    @staticmethod
+    def load_from_file(path: str) -> "GameEngine":
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        GameEngine._validate_data(data)
+
+        rooms: Dict[str, Room] = {}
+        for room_name, r in data["rooms"].items():
+            exits: Dict[str, Exit] = {}
+            for direction, e in r.get("exits", {}).items():
+                exits[direction] = Exit(
+                    to=e["to"],
+                    locked=bool(e.get("locked", False)),
+                    requires=e.get("requires"),
+                    lock_msg=e.get("lock_msg", "It's locked.")
+                )
+            rooms[room_name] = Room(
+                name=room_name,
+                description=r.get("description", ""),
+                items=list(r.get("items", [])),
+                exits=exits,
+                npc_ids=list(r.get("npcs", [])),
+                events=dict(r.get("events", {}))
+            )
+        npcs: Dict[str, NPC] = {}
+        for npc_id, n in data.get("npcs", {}).items():
+            npcs[npc_id] = NPC(
+                npc_id=npc_id,
+                display_name=n.get("display_name", npc_id.title()),
+                room=n.get("room", ""),
+                dialogue=dict(n.get("dialogue", {})),
+                events=dict(n.get("events", {}))
+            )
+
+        rules = dict(data.get("rules", {"win": [], "lose": []}))
+        start_room = data["start_room"]
+
+        return GameEngine(rooms=rooms, npcs=npcs, rules=rules, start_room=start_room)
+def _validate_data(data: dict) -> None:
+        if "start_room" not in data or "rooms" not in data:
+            raise GameDataError("JSON must contain 'start_room' and 'rooms'.")
+        if data["start_room"] not in data["rooms"]:
+            raise GameDataError("start_room must exist in rooms.")
+
+        # exits must point to valid rooms
+        for room_name, r in data["rooms"].items():
+            exits = r.get("exits", {})
+            if not isinstance(exits, dict):
+                raise GameDataError(f"Room '{room_name}' exits must be a dict.")
+            for direction, e in exits.items():
+                if "to" not in e:
+                    raise GameDataError(f"Room '{room_name}' exit '{direction}' missing 'to'.")
+                if e["to"] not in data["rooms"]:
+                    raise GameDataError(f"Exit from '{room_name}' points to unknown room '{e['to']}'.")
+
+#loop 
+    def dispatch(self, verb: str, arg: Optional[str]) -> str:
+        verb = (verb or "").lower()
+        if not verb:
+            return "Please type a command. Type 'help' to see options."
+
+        handler = self.commands.get(verb)
+        if not handler:
+            return "Invalid command. Type 'help' to see available commands."
+
+        return handler(arg)
+
+    def should_quit(self) -> bool:
+        return self._should_quit
+
+#discription plus identification 
+def current_room(self) -> Room:
+        return self.rooms[self.state.current_room]
+
+    def describe_current(self) -> str:
+        room = self.current_room()
+        lines = [f"\n== {room.name} ==", room.description]
+        lines.append("Items here: " + (", ".join(room.items) if room.items else "(none)"))
+        lines.append("Exits: " + (", ".join(sorted(room.exits.keys())) if room.exits else "(none)"))
+
+        present_npcs = self._npcs_in_room(room.name)
+        lines.append("People here: " + (", ".join(n.display_name for n in present_npcs) if present_npcs else "(none)"))
+        return "\n".join(lines)
+
+    def _npcs_in_room(self, room_name: str) -> List[NPC]:
+        room = self.rooms[room_name]
+        result: List[NPC] = []
+        for npc_id in room.npc_ids:
+            npc = self.npcs.get(npc_id)
+            if npc and npc.room == room_name:
+                result.append(npc)
+        return result
+
+#game rules including winning or loosing 
+    def evaluate_end_state(self) -> Tuple[bool, Optional[str]]:
+        # lose if ALL lose rules satisfied? Usually ANY lose rule triggers.
+        if self._any_conditions_met(self.rules.get("lose", [])):
+            return True, "LOSE: You met a lose condition. Game over."
+
+        # win if ALL win rules satisfied (common pattern)
+        if self._all_conditions_met(self.rules.get("win", [])):
+            return True, "WIN: You met the win conditions. Congratulations!"
+
+        return False, None
+
+    def _any_conditions_met(self, conditions: List[dict]) -> bool:
+        return any(self._condition_met(c) for c in conditions) if conditions else False
+
+    def _all_conditions_met(self, conditions: List[dict]) -> bool:
+        return all(self._condition_met(c) for c in conditions) if conditions else False
+
+    def _condition_met(self, cond: Dict[str, Any]) -> bool:
+        ctype = cond.get("type")
+
+        if ctype == "in_room":
+            return self.state.current_room == cond.get("room")
+
+        if ctype == "has_item":
+            return cond.get("item") in self.state.inventory
+
+        if ctype == "room_has_item":
+            room = cond.get("room")
+            item = cond.get("item")
+            if room not in self.rooms:
+                return False
+            return item in self.rooms[room].items
+#safe default: if conditions are unknown or never met return false 
+
+#system of events that occur 
+def apply_events(self, events: List[dict]) -> List[str]:
+        """
+        Small, controlled effect scripts defined in JSON.
+        Supported event types:
+          - message: {"type":"message","text":"..."}
+          - give_item: {"type":"give_item","item":"x"}
+          - take_item: {"type":"take_item","item":"x"}
+          - add_room_item: {"type":"add_room_item","room":"Hall","item":"x"}
+          - remove_room_item: {"type":"remove_room_item","room":"Hall","item":"x"}
+          - unlock_exit: {"type":"unlock_exit","room":"Garden","direction":"east"}
+        Returns list of messages to print.
+        """
+        out: List[str] = []
+        for e in events:
+            et = e.get("type")
+
+            if et == "message":
+                text = str(e.get("text", "")).strip()
+                if text:
+                    out.append(text)
+
+            elif et == "give_item":
+                item = e.get("item")
+                if item and item not in self.state.inventory:
+                    self.state.inventory.append(item)
+                    out.append(f"(You received: {item})")
+
+            elif et == "take_item":
+                item = e.get("item")
+                if item and item in self.state.inventory:
+                    self.state.inventory.remove(item)
+                    out.append(f"(You lost: {item})")
+
+            elif et == "add_room_item":
+                room = e.get("room")
+                item = e.get("item")
+                if room in self.rooms and item:
+                    if item not in self.rooms[room].items:
+                        self.rooms[room].items.append(item)
+                        out.append(f"(An item appeared in {room}: {item})")
+
+            elif et == "remove_room_item":
+                room = e.get("room")
+                item = e.get("item")
+                if room in self.rooms and item and item in self.rooms[room].items:
+                    self.rooms[room].items.remove(item)
+                    out.append(f"(An item was removed from {room}: {item})")
+
+            elif et == "unlock_exit":
+                room = e.get("room")
+                direction = e.get("direction")
+                if room in self.rooms and direction in self.rooms[room].exits:
+                    self.rooms[room].exits[direction].locked = False
+                    out.append(f"(Unlocked exit: {room} -> {direction})")
+#if event tupe is unknow = ignor and return out 
+
+#game commands + game save 
+def cmd_help(self, _: Optional[str]) -> str:
+        return "\n".join([
+            "Available commands:",
+            "  look                     - describe the current room",
+            "  go <direction>           - move (e.g., go north / go down)",
+            "  get <item>               - pick up an item",
+            "  drop <item>              - drop an item",
+            "  inventory                - show your inventory",
+            "  talk to <npc>            - talk to a character",
+            "  save                     - save to savegame.json",
+            "  load                     - load from savegame.json",
+            "  help                     - show this help",
+            "  quit                     - exit the game"
+        ])
+def cmd_look(self, _: Optional[str]) -> str:
+        return self.describe_current()
+
+    def cmd_inventory(self, _: Optional[str]) -> str:
+        return "Inventory: " + (", ".join(self.state.inventory) if self.state.inventory else "(empty)")
+
+    def cmd_go(self, direction: Optional[str]) -> str:
+        if not direction:
+            return "Go where? Example: go north"
+
+        room = self.current_room()
+        if direction not in room.exits:
+            return "You can't go that way."
+
+        ex = room.exits[direction]
+
+        # locked door logic is still data-driven
+        if ex.locked:
+            needed = ex.requires
+            if needed and needed in self.state.inventory:
+                ex.locked = False
+                # move after unlocking
+                self.state.current_room = ex.to
+                msgs = [f"You use {needed} to unlock the way {direction}."]
+            else:
+                return ex.lock_msg
+        else:
+            self.state.current_room = ex.to
+            msgs = [f"You go {direction}."]
+
+#entering room events 
+        enter_events = self.current_room().events.get("on_enter", [])
+        msgs.extend(self.apply_events(enter_events))
+        msgs.append(self.describe_current())
+        return "\n".join(msgs)
+
+    def cmd_get(self, item: Optional[str]) -> str:
+        if not item:
+            return "Get what? Example: get key"
+
+        room = self.current_room()
+        if item not in room.items:
+            return "That item is not here."
+
+        room.items.remove(item)
+        self.state.inventory.append(item)
+
+        msgs = [f"You pick up the {item}."]
+
+        # optional: room on_get events
+        msgs.extend(self.apply_events(room.events.get("on_get", [])))
+return "\n".join(msgs)
+
+def cmd_drop(self, item: Optional[str]) -> str:
+        if not item:
+            return "Drop what? Example: drop map"
+        if item not in self.state.inventory:
+            return "You don't have that item."
+
+        self.state.inventory.remove(item)
+        self.current_room().items.append(item)
+        return f"You drop the {item}."
+
+    def cmd_talk(self, name: Optional[str]) -> str:
+        if not name:
+            return "Talk to who? Example: talk to elf"
+        
+          # able to loacate NPC in current room through display name or id 
+        present = self._npcs_in_room(self.state.current_room)
+        target: Optional[NPC] = None
+        for npc in present:
+            if npc.npc_id.lower() == name.lower() or npc.display_name.lower() == name.lower():
+                target = npc
+                break
+        if not target:
+            return "No one by that name is here."
+        
+        #dialogue selection: if_has_item_<item>
+        line = target.dialogue.get("default", "...")
+        for inv_item in self.state.inventory:
+            key = f"if_has_item_{inv_item}"
+            if key in target.dialogue:
+                line = target.dialogue[key]
+                break
+        msgs = [f"{target.display_name}: {line}"]
+
+        # NPC events on talk
+        msgs.extend(self.apply_events(target.events.get("on_talk", [])))
+        return "\n".join(msgs)
+
+    def cmd_save(self, _: Optional[str]) -> str:
+        return self.save("savegame.json")
+
+    def cmd_load(self, _: Optional[str]) -> str:
+        msg = self.load("savegame.json")
+        return msg + "\n" + self.describe_current()
+    def cmd_quit(self, _: Optional[str]) -> str:
+        self._should_quit = True
+        return "Goodbye!"
+#saving and loading game - same or changed state 
+def save(self, path: str) -> str:
+        payload = {
+            "current_room": self.state.current_room,
+            "inventory": list(self.state.inventory),
+            "rooms": {
+                rn: {
+                    "items": list(r.items),
+                    "exits": {d: {"locked": ex.locked} for d, ex in r.exits.items()}
+                } for rn, r in self.rooms.items()
+            }
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+        return f"Game saved to {path}."
+
+    def load(self, path: str) -> str:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+        except FileNotFoundError:
+            return f"No save file found at {path}."
+if "current_room" not in payload or "inventory" not in payload:
+            return "Save file invalid (missing fields)."
+        if payload["current_room"] not in self.rooms:
+            return "Save file invalid (unknown room)."
+
+        self.state.current_room = payload["current_room"]
+        self.state.inventory = list(payload["inventory"])
+
+        rooms_payload = payload.get("rooms", {})
+        for rn, rdata in rooms_payload.items():
+            if rn in self.rooms:
+                self.rooms[rn].items = list(rdata.get("items", self.rooms[rn].items))
+                exits_data = rdata.get("exits", {})
+                for d, ed in exits_data.items():
+                    if d in self.rooms[rn].exits:
+                        self.rooms[rn].exits[d].locked = bool(ed.get("locked", self.rooms[rn].exits[d].locked))
+
+        return f"Game loaded from {path}."
+
+ from engine import GameEngine, GameDataError
+from parser import parse_command 
+
+def main():
+    try:
+        engine = GameEngine.load_from_file("game_map.json")
+    except FileNotFoundError:
+        print("Error: game_map.json not found.")
+        return
+    except GameDataError as e:
+        print(f"Error in game_map.json:{e}")
+        return
+print("Text Adventure Engine (FrameWork Style)")
+print("Type HELP for commands")
+
+#Starts the On_enter events
+start_events = engine.current_room().events.get("on_enter,[]")
+for message in engine.apply_events(start_events):
+    print(message)
+
+#explains the room after events
+print(engine.describe_current())
+
+if __name__ == "__main__":
+    main()    
+
+
+
+    
