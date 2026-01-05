@@ -1,0 +1,543 @@
+# gamemap.py
+import json
+import os
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+
+@dataclass(frozen=True)
+class Command:
+    verb: str
+    arg: Optional[str] = None
+
+
+def parse_command(raw: str) -> Command:
+    raw = raw.strip().lower()
+    if not raw:
+        return Command(verb="")
+
+    parts: List[str] = raw.split()
+
+    if len(parts) >= 3 and parts[0] == "talk" and parts[1] == "to":
+        return Command(verb="talk", arg=" ".join(parts[2:]).strip() or None)
+
+    return Command(
+        verb=parts[0],
+        arg=(" ".join(parts[1:]).strip() if len(parts) > 1 else None) or None,
+    )
+
+
+class GameDataError(Exception):
+    pass
+
+
+@dataclass
+class Exit:
+    to: str
+    locked: bool = False
+    requires: Optional[str] = None
+    lock_msg: str = "It's locked."
+
+
+@dataclass
+class Room:
+    name: str
+    description: str = ""
+    items: List[str] = field(default_factory=list)
+    exits: Dict[str, Exit] = field(default_factory=dict)
+    npc_ids: List[str] = field(default_factory=list)
+    events: Dict[str, List[dict]] = field(default_factory=dict)
+
+
+@dataclass
+class NPC:
+    npc_id: str
+    display_name: str
+    room: str
+    dialogue: Dict[str, str] = field(default_factory=dict)
+    events: Dict[str, List[dict]] = field(default_factory=dict)
+
+
+@dataclass
+class pGameState:
+    current_room: str
+    inventory: List[str] = field(default_factory=list)
+    tasks: Dict[str, Dict[str, str]] = field(default_factory=dict)
+
+
+class GameEngine:
+    """
+    Framework responsibilities:
+    - Load world from JSON (rooms/npcs/exits/rules/events)
+    - Maintain state (location + inventory + mutable world)
+    - Execute commands via a command registry
+    - Evaluate win/lose rules (generic conditions)
+    - Apply events (small effect scripts) in a controlled way
+    """
+
+    def __init__(
+        self,
+        rooms: Dict[str, Room],
+        npcs: Dict[str, NPC],
+        rules: Dict[str, List[dict]],
+        start_room: str,
+    ) -> None:
+        self.rooms = rooms
+        self.npcs = npcs
+        self.rules = rules
+        self.state = GameState(current_room=start_room, inventory=[])
+
+        self.commands: Dict[str, Callable[[Optional[str]], str]] = {
+            "help": self.cmd_help,
+            "look": self.cmd_look,
+            "inventory": self.cmd_inventory,
+            "tasks": self.cmd_tasks,
+            "go": self.cmd_go,
+            "get": self.cmd_get,
+            "drop": self.cmd_drop,
+            "use": self.cmd_use,
+            "talk": self.cmd_talk,
+            "save": self.cmd_save,
+            "load": self.cmd_load,
+            "quit": self.cmd_quit,
+        }
+        self._should_quit = False
+
+    @staticmethod
+    def load_from_file(path: str) -> "GameEngine":
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        GameEngine._validate_data(data)
+
+        rooms: Dict[str, Room] = {}
+        for room_name, r in data["rooms"].items():
+            exits: Dict[str, Exit] = {}
+            for direction, e in r.get("exits", {}).items():
+                exits[direction] = Exit(
+                    to=e["to"],
+                    locked=bool(e.get("locked", False)),
+                    requires=e.get("requires"),
+                    lock_msg=e.get("lock_msg", "It's locked."),
+                )
+            rooms[room_name] = Room(
+                name=room_name,
+                description=r.get("description", ""),
+                items=list(r.get("items", [])),
+                exits=exits,
+                npc_ids=list(r.get("npcs", [])),
+                events=dict(r.get("events", {})),
+            )
+
+        npcs: Dict[str, NPC] = {}
+        for npc_id, n in data.get("npcs", {}).items():
+            npcs[npc_id] = NPC(
+                npc_id=npc_id,
+                display_name=n.get("display_name", npc_id.title()),
+                room=n.get("room", ""),
+                dialogue=dict(n.get("dialogue", {})),
+                events=dict(n.get("events", {})),
+            )
+
+        rules = dict(data.get("rules", {"win": [], "lose": []}))
+        start_room = data["start_room"]
+
+        return GameEngine(rooms=rooms, npcs=npcs, rules=rules, start_room=start_room)
+
+    @staticmethod
+    def _validate_data(data: dict) -> None:
+        if "start_room" not in data or "rooms" not in data:
+            raise GameDataError("JSON must contain 'start_room' and 'rooms'.")
+        if data["start_room"] not in data["rooms"]:
+            raise GameDataError("start_room must exist in rooms.")
+
+        for room_name, r in data["rooms"].items():
+            exits = r.get("exits", {})
+            if not isinstance(exits, dict):
+                raise GameDataError(f"Room '{room_name}' exits must be a dict.")
+            for direction, e in exits.items():
+                if "to" not in e:
+                    raise GameDataError(
+                        f"Room '{room_name}' exit '{direction}' missing 'to'."
+                    )
+                if e["to"] not in data["rooms"]:
+                    raise GameDataError(
+                        f"Exit from '{room_name}' points to unknown room '{e['to']}'."
+                    )
+
+    def dispatch(self, verb: str, arg: Optional[str]) -> str:
+        verb = (verb or "").lower()
+        if not verb:
+            return "Please type a command. Type 'help' to see options."
+
+        handler = self.commands.get(verb)
+        if not handler:
+            return "Invalid command. Type 'help' to see available commands."
+
+        return handler(arg)
+
+    def should_quit(self) -> bool:
+        return self._should_quit
+
+    def current_room(self) -> Room:
+        return self.rooms[self.state.current_room]
+
+    def describe_current(self) -> str:
+        room = self.current_room()
+        lines = [f"\n== {room.name} ==", room.description]
+        lines.append(
+            "Items here: " + (", ".join(room.items) if room.items else "(none)")
+        )
+        lines.append(
+            "Exits: " + (", ".join(sorted(room.exits.keys())) if room.exits else "(none)")
+        )
+
+        present_npcs = self._npcs_in_room(room.name)
+        lines.append(
+            "People here: "
+            + (", ".join(n.display_name for n in present_npcs) if present_npcs else "(none)")
+        )
+        return "\n".join(lines)
+
+    def _npcs_in_room(self, room_name: str) -> List[NPC]:
+        room = self.rooms[room_name]
+        result: List[NPC] = []
+        for npc_id in room.npc_ids:
+            npc = self.npcs.get(npc_id)
+            if npc and npc.room == room_name:
+                result.append(npc)
+        return result
+
+    def evaluate_end_state(self) -> Tuple[bool, Optional[str]]:
+        if self._any_conditions_met(self.rules.get("lose", [])):
+            return True, "LOSE: You met a lose condition. Game over."
+
+        if self._all_conditions_met(self.rules.get("win", [])):
+            return True, "WIN: You met the win conditions. Congratulations!"
+
+        return False, None
+
+    def _any_conditions_met(self, conditions: List[dict]) -> bool:
+        return any(self._condition_met(c) for c in conditions) if conditions else False
+
+    def _all_conditions_met(self, conditions: List[dict]) -> bool:
+        return all(self._condition_met(c) for c in conditions) if conditions else False
+
+    def _condition_met(self, cond: Dict[str, Any]) -> bool:
+        ctype = cond.get("type")
+
+        if ctype == "in_room":
+            return self.state.current_room == cond.get("room")
+
+        if ctype == "has_item":
+            return cond.get("item") in self.state.inventory
+
+        if ctype == "room_has_item":
+            room = cond.get("room")
+            item = cond.get("item")
+            if room not in self.rooms:
+                return False
+            return item in self.rooms[room].items
+
+        return False
+
+    def cmd_help(self, _: Optional[str]) -> str:
+        return "\n".join(
+            [
+                "Available commands:",
+                "  look                     - describe the current room",
+                "  go <direction>           - move (e.g., go north / go down)",
+                "  get <item>               - pick up an item",
+                "  drop <item>              - drop an item",
+                "  inventory                - show your inventory",
+                "  tasks                    - list current tasks",
+                "  use <item>               - use an item in your inventory",
+                "  talk to <npc>            - talk to a character",
+                "  save                     - save to savegame.json",
+                "  load                     - load from savegame.json",
+                "  help                     - show this help",
+                "  quit                     - exit the game",
+            ]
+        )
+
+    def cmd_look(self, _: Optional[str]) -> str:
+        return self.describe_current()
+
+    def cmd_inventory(self, _: Optional[str]) -> str:
+        return (
+            "Inventory: "
+            + (", ".join(self.state.inventory) if self.state.inventory else "(empty)")
+        )
+
+    def cmd_tasks(self, _: Optional[str]) -> str:
+        if not self.state.tasks:
+            return "Tasks: (none)"
+        lines = ["Tasks:"]
+        for task_id, info in self.state.tasks.items():
+            status = info.get("status", "active")
+            desc = info.get("description", task_id)
+            lines.append(f"  [{status}] {desc}")
+        return "\n".join(lines)
+
+    def cmd_go(self, direction: Optional[str]) -> str:
+        if not direction:
+            return "Go where? Example: go north"
+
+        room = self.current_room()
+        if direction not in room.exits:
+            return "You can't go that way."
+
+        ex = room.exits[direction]
+        if ex.locked:
+            needed = ex.requires
+            if needed and needed in self.state.inventory:
+                ex.locked = False
+                self.state.current_room = ex.to
+                msgs = [f"You use {needed} to unlock the way {direction}."]
+            else:
+                return ex.lock_msg
+        else:
+            self.state.current_room = ex.to
+            msgs = [f"You go {direction}."]
+
+        enter_events = self.current_room().events.get("on_enter", [])
+        msgs.extend(self.apply_events(enter_events))
+        msgs.append(self.describe_current())
+        return "\n".join(msgs)
+
+    def cmd_get(self, item: Optional[str]) -> str:
+        if not item:
+            return "Get what? Example: get key"
+
+        room = self.current_room()
+        if item not in room.items:
+            return "That item is not here."
+
+        room.items.remove(item)
+        self.state.inventory.append(item)
+
+        msgs = [f"You pick up the {item}."]
+        msgs.extend(self.apply_events(room.events.get("on_get", [])))
+        return "\n".join(msgs)
+
+    def cmd_drop(self, item: Optional[str]) -> str:
+        if not item:
+            return "Drop what? Example: drop map"
+        if item not in self.state.inventory:
+            return "You don't have that item."
+
+        self.state.inventory.remove(item)
+        self.current_room().items.append(item)
+        return f"You drop the {item}."
+
+    def cmd_use(self, item: Optional[str]) -> str:
+        if not item:
+            return "Use what? Example: use key"
+        if item not in self.state.inventory:
+            return "You don't have that item."
+
+        room = self.current_room()
+        usable_events = [
+            e for e in room.events.get("on_use", []) if e.get("item") == item
+        ]
+        if not usable_events:
+            return "Nothing happens."
+
+        msgs: List[str] = []
+        for e in usable_events:
+            msgs.extend(self.apply_events(e.get("events", [])))
+        return "\n".join(msgs) if msgs else "Nothing happens."
+
+    def cmd_talk(self, name: Optional[str]) -> str:
+        if not name:
+            return "Talk to who? Example: talk to elf"
+
+        present = self._npcs_in_room(self.state.current_room)
+        target: Optional[NPC] = None
+        for npc in present:
+            if npc.npc_id.lower() == name.lower() or npc.display_name.lower() == name.lower():
+                target = npc
+                break
+        if not target:
+            return "No one by that name is here."
+
+        line = target.dialogue.get("default", "...")
+        for inv_item in self.state.inventory:
+            key = f"if_has_item_{inv_item}"
+            if key in target.dialogue:
+                line = target.dialogue[key]
+                break
+        msgs = [f"{target.display_name}: {line}"]
+        msgs.extend(self.apply_events(target.events.get("on_talk", [])))
+        return "\n".join(msgs)
+
+    def cmd_save(self, _: Optional[str]) -> str:
+        return self.save("savegame.json")
+
+    def cmd_load(self, _: Optional[str]) -> str:
+        msg = self.load("savegame.json")
+        return msg + "\n" + self.describe_current()
+
+    def cmd_quit(self, _: Optional[str]) -> str:
+        self._should_quit = True
+        return "Goodbye!"
+
+    def save(self, path: str) -> str:
+        payload = {
+            "current_room": self.state.current_room,
+            "inventory": list(self.state.inventory),
+            "tasks": dict(self.state.tasks),
+            "rooms": {
+                rn: {
+                    "items": list(r.items),
+                    "exits": {d: {"locked": ex.locked} for d, ex in r.exits.items()},
+                }
+                for rn, r in self.rooms.items()
+            },
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+        return f"Game saved to {path}."
+
+    def load(self, path: str) -> str:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+        except FileNotFoundError:
+            return f"No save file found at {path}."
+
+        if "current_room" not in payload or "inventory" not in payload:
+            return "Save file invalid (missing fields)."
+        if payload["current_room"] not in self.rooms:
+            return "Save file invalid (unknown room)."
+
+        self.state.current_room = payload["current_room"]
+        self.state.inventory = list(payload["inventory"])
+        self.state.tasks = dict(payload.get("tasks", {}))
+
+        rooms_payload = payload.get("rooms", {})
+        for rn, rdata in rooms_payload.items():
+            if rn in self.rooms:
+                self.rooms[rn].items = list(rdata.get("items", self.rooms[rn].items))
+                exits_data = rdata.get("exits", {})
+                for d, ed in exits_data.items():
+                    if d in self.rooms[rn].exits:
+                        self.rooms[rn].exits[d].locked = bool(
+                            ed.get("locked", self.rooms[rn].exits[d].locked)
+                        )
+
+        return f"Game loaded from {path}."
+
+    def apply_events(self, events: List[dict]) -> List[str]:
+        out: List[str] = []
+        for e in events:
+            et = e.get("type")
+
+            if et == "message":
+                text = str(e.get("text", "")).strip()
+                if text:
+                    out.append(text)
+
+            elif et == "give_item":
+                item = e.get("item")
+                if item and item not in self.state.inventory:
+                    self.state.inventory.append(item)
+                    out.append(f"(You received: {item})")
+
+            elif et == "take_item":
+                item = e.get("item")
+                if item and item in self.state.inventory:
+                    self.state.inventory.remove(item)
+                    out.append(f"(You lost: {item})")
+
+            elif et == "add_room_item":
+                room = e.get("room")
+                item = e.get("item")
+                if room in self.rooms and item:
+                    if item not in self.rooms[room].items:
+                        self.rooms[room].items.append(item)
+                        out.append(f"(An item appeared in {room}: {item})")
+
+            elif et == "remove_room_item":
+                room = e.get("room")
+                item = e.get("item")
+                if room in self.rooms and item and item in self.rooms[room].items:
+                    self.rooms[room].items.remove(item)
+                    out.append(f"(An item was removed from {room}: {item})")
+
+            elif et == "unlock_exit":
+                room = e.get("room")
+                direction = e.get("direction")
+                if room in self.rooms and direction in self.rooms[room].exits:
+                    self.rooms[room].exits[direction].locked = False
+                    out.append(f"(Unlocked exit: {room} -> {direction})")
+
+            elif et == "give_task":
+                task_id = e.get("task_id")
+                desc = e.get("description", task_id)
+                if task_id and task_id not in self.state.tasks:
+                    self.state.tasks[task_id] = {
+                        "description": desc or task_id,
+                        "status": "active",
+                    }
+                    out.append(f"(Task added: {desc})")
+
+            elif et == "complete_task":
+                task_id = e.get("task_id")
+                requires_item = e.get("requires_item")
+                consume_item = bool(e.get("consume_item", False))
+                if task_id and task_id in self.state.tasks:
+                    if requires_item and requires_item not in self.state.inventory:
+                        out.append(
+                            e.get(
+                                "missing_msg",
+                                f"(You still need {requires_item}.)",
+                            )
+                        )
+                        continue
+                    if consume_item and requires_item in self.state.inventory:
+                        self.state.inventory.remove(requires_item)
+                        out.append(f"(You used: {requires_item})")
+                    self.state.tasks[task_id]["status"] = "completed"
+                    out.append(e.get("message", "(Task completed.)"))
+
+        return out
+
+
+def main() -> None:
+    try:
+        data_path = os.path.join(os.path.dirname(__file__), "gamemap.json")
+        engine = GameEngine.load_from_file(data_path)
+    except FileNotFoundError:
+        print("Error: gamemap.json not found.")
+        return
+    except GameDataError as e:
+        print(f"Error in gamemap.json: {e}")
+        return
+
+    start_events = engine.current_room().events.get("on_enter", [])
+    print("Type HELP for commands")
+    for message in engine.apply_events(start_events):
+        print(message)
+
+    print(engine.describe_current())
+
+    while not engine.should_quit():
+        try:
+            raw = input("\n> ")
+        except EOFError:
+            print("\nGoodbye!")
+            break
+        cmd = parse_command(raw)
+        output = engine.dispatch(cmd.verb, cmd.arg)
+        if output:
+            print(output)
+
+        ended, msg = engine.evaluate_end_state()
+        if ended and msg:
+            print(msg)
+            break
+
+
+if __name__ == "__main__":
+    main()
